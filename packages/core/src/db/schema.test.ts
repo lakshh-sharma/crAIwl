@@ -6,7 +6,7 @@ import {
   crawlRun,
   extractedRecord,
   fetchAttempt,
-  strategyConfig,
+  strategyConfigTable,
 } from './schema.js';
 
 function columnNames(table: Parameters<typeof getTableConfig>[0]): string[] {
@@ -45,7 +45,7 @@ describe('db schema', () => {
   });
 
   it('strategy_config uses (job_id, version) as composite primary key', () => {
-    const cfg = getTableConfig(strategyConfig);
+    const cfg = getTableConfig(strategyConfigTable);
     expect(cfg.name).toBe('strategy_config');
     const pk = cfg.primaryKeys[0];
     expect(pk).toBeDefined();
@@ -53,7 +53,7 @@ describe('db schema', () => {
   });
 
   it('strategy_config records provenance fields required by CRAWL-005', () => {
-    const cols = columnNames(strategyConfig);
+    const cols = columnNames(strategyConfigTable);
     expect(cols).toContain('payload');
     expect(cols).toContain('created_by');
     expect(cols).toContain('created_at');

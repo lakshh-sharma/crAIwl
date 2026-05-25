@@ -43,7 +43,7 @@ export const crawlJob = pgTable(
  * extraction program (locators, anchors, validate rules). Self-heal bumps
  * version + records `reason='self-heal'`; user edits use `reason='manual-edit'`.
  */
-export const strategyConfig = pgTable(
+export const strategyConfigTable = pgTable(
   'strategy_config',
   {
     jobId: uuid('job_id')
@@ -163,8 +163,8 @@ export const auditEvent = pgTable(
 
 export type CrawlJob = typeof crawlJob.$inferSelect;
 export type NewCrawlJob = typeof crawlJob.$inferInsert;
-export type StrategyConfig = typeof strategyConfig.$inferSelect;
-export type NewStrategyConfig = typeof strategyConfig.$inferInsert;
+export type StrategyConfigRow = typeof strategyConfigTable.$inferSelect;
+export type NewStrategyConfigRow = typeof strategyConfigTable.$inferInsert;
 export type CrawlRun = typeof crawlRun.$inferSelect;
 export type NewCrawlRun = typeof crawlRun.$inferInsert;
 export type ExtractedRecord = typeof extractedRecord.$inferSelect;
