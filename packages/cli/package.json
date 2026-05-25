@@ -1,0 +1,19 @@
+{
+  "name": "@craiwl/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "craiwl": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@craiwl/core": "workspace:*",
+    "@craiwl/orchestrator": "workspace:*"
+  }
+}
