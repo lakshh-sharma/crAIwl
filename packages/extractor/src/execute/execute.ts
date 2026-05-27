@@ -25,6 +25,8 @@ import {
   type FieldType,
   type Transform,
 } from '@craiwl/core';
+import { checkGrounding, normalizeForGrounding } from './grounding.js';
+import { scoreConfidence } from './confidence.js';
 
 export type FieldOutcome =
   | {
@@ -32,9 +34,15 @@ export type FieldOutcome =
       value: unknown;
       /** Locator that resolved and passed validation. */
       locator: string;
+      /** Rank of the winning locator within the field's candidate list (0 = first choice). */
+      locatorRank: number;
       /** Raw textContent of the matched node before transform/coercion. */
       rawText: string;
-      /** Confidence in this extraction. Always 1.0 until the grounding guard lands. */
+      /** True when rawText traces back to source DOM text. */
+      grounded: boolean;
+      /** Why grounding failed, if it did. */
+      groundingReason?: 'not-in-source' | 'empty-source' | 'empty-text';
+      /** Composite confidence [0..1]. See `confidence.ts`. */
       confidence: number;
     }
   | {
@@ -90,6 +98,12 @@ export function execute(opts: ExecuteOptions): ExtractionResult {
   const dom = new JSDOM(opts.cleanedHtml);
   const doc = dom.window.document;
 
+  // Capture the page's grounded text once; every field's rawText is checked
+  // against this. Using textContent (normalized) keeps the cost flat.
+  const sourceText = normalizeForGrounding(
+    doc.body?.textContent ?? doc.documentElement.textContent ?? '',
+  );
+
   const records: ExtractedRecord[] = [];
   const perTemplate: Record<string, number> = {};
   let successCount = 0;
@@ -106,7 +120,7 @@ export function execute(opts: ExecuteOptions): ExtractionResult {
     for (const root of roots) {
       const fields: Record<string, FieldOutcome> = {};
       for (const [fieldName, spec] of Object.entries(template.fields)) {
-        const outcome = extractField(dom, root, spec);
+        const outcome = extractField(dom, root, spec, sourceText);
         fields[fieldName] = outcome;
         if (outcome.ok) successCount++;
         else failureCount++;
@@ -130,7 +144,44 @@ export function execute(opts: ExecuteOptions): ExtractionResult {
   };
 }
 
-function extractField(dom: JSDOM, root: Element | Document, spec: FieldSpec): FieldOutcome {
+/**
+ * Partition a result's records into clean output vs. review queue based on
+ * the per-field confidence and the config's `confidenceFloor`. A record
+ * enters the review queue if ANY of its fields fails grounding OR falls
+ * below the floor. Failed fields (ok: false) are inherited from the record
+ * as-is — they were never clean to begin with.
+ */
+export type PartitionResult = {
+  clean: ExtractedRecord[];
+  review: ExtractedRecord[];
+};
+
+export function partitionByConfidence(
+  result: ExtractionResult,
+  confidenceFloor: number,
+): PartitionResult {
+  const clean: ExtractedRecord[] = [];
+  const review: ExtractedRecord[] = [];
+  for (const rec of result.records) {
+    let needsReview = false;
+    for (const outcome of Object.values(rec.fields)) {
+      if (!outcome.ok) continue; // failed fields are reported separately, not what gates clean output
+      if (!outcome.grounded || outcome.confidence < confidenceFloor) {
+        needsReview = true;
+        break;
+      }
+    }
+    (needsReview ? review : clean).push(rec);
+  }
+  return { clean, review };
+}
+
+function extractField(
+  dom: JSDOM,
+  root: Element | Document,
+  spec: FieldSpec,
+  sourceText: string,
+): FieldOutcome {
   const transform: Transform | null = spec.transform
     ? compileTransformPipeline(spec.transform)
     : null;
@@ -139,8 +190,10 @@ function extractField(dom: JSDOM, root: Element | Document, spec: FieldSpec): Fi
     : null;
 
   const attempts: LocatorAttempt[] = [];
+  const totalLocators = spec.locators.length;
 
-  for (const locator of spec.locators) {
+  for (let rank = 0; rank < spec.locators.length; rank++) {
+    const locator = spec.locators[rank]!;
     const node = resolveOne(dom, root, locator);
     if (!node) {
       attempts.push({ locator, result: 'no-match' });
@@ -169,13 +222,25 @@ function extractField(dom: JSDOM, root: Element | Document, spec: FieldSpec): Fi
       continue;
     }
 
-    return {
+    const grounding = checkGrounding(rawText, sourceText);
+    const confidence = scoreConfidence({
+      locatorRank: rank,
+      totalLocators,
+      grounded: grounding.grounded,
+      hadValidate: validator !== null,
+    });
+
+    const outcome: FieldOutcome = {
       ok: true,
       value: coerced,
       locator,
+      locatorRank: rank,
       rawText,
-      confidence: 1,
+      grounded: grounding.grounded,
+      confidence,
     };
+    if (grounding.reason) outcome.groundingReason = grounding.reason;
+    return outcome;
   }
 
   // All locators exhausted. Pick the most-specific failure reason from the
