@@ -12,8 +12,9 @@
  * The Anthropic API key comes from ANTHROPIC_API_KEY.
  */
 
-import { writeFile } from 'node:fs/promises';
-import { readFile } from 'node:fs/promises';
+import { writeFile, readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { AnthropicProvider } from '@craiwl/core';
 import { Tier0Fetcher, RobotsCache, type Fetcher } from '@craiwl/fetcher';
 import {
@@ -23,7 +24,12 @@ import {
   serializeAsJson,
   serializeAsCsv,
   serializeAsMarkdown,
+  ScheduleStore,
+  Scheduler,
+  parseDuration,
+  formatDuration,
   type SerializedOutput,
+  type ScheduleEntry,
 } from '@craiwl/orchestrator';
 
 export const PACKAGE_NAME = '@craiwl/cli';
@@ -34,6 +40,11 @@ USAGE
   craiwl crawl   <url> --goal "<goal>"      [options]   compile + crawl
   craiwl compile <url> --goal "<goal>" -o config.json   save a config (no crawl)
   craiwl run --config <path>                [options]   run an existing config
+  craiwl schedule add --config <path> --every <duration>   register a recurring run
+  craiwl schedule list                                     show active schedules
+  craiwl schedule remove <id>                              unregister
+  craiwl schedule run-due                                  run anything due now
+  craiwl schedule daemon                                   long-running scheduler loop
   craiwl --help
 
 COMMON OPTIONS
@@ -46,12 +57,21 @@ COMMON OPTIONS
   --robots respect|warn|ignore  robots.txt policy (default: respect)
   --no-follow-links       seed only — do not enqueue on-page links
 
+SCHEDULE OPTIONS
+  --every <duration>      interval, e.g. 30m, 6h, 1d
+  --base-dir <path>       state dir (default: ~/.craiwl)
+  --poll <duration>       daemon poll interval (default: 1m)
+
 ENVIRONMENT
   ANTHROPIC_API_KEY       required for compile (set in your shell or .env)
 `;
 
+type Command = 'crawl' | 'compile' | 'run' | 'schedule' | 'help';
+
 type Parsed = {
-  command: 'crawl' | 'compile' | 'run' | 'help';
+  command: Command;
+  /** For multi-word commands (e.g. `schedule add`), the second token. */
+  subcommand?: string;
   positional: string[];
   options: Record<string, string | boolean>;
 };
@@ -61,13 +81,19 @@ export function parseArgs(argv: string[]): Parsed {
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') return out;
 
   const cmd = argv[0];
-  if (cmd === 'crawl' || cmd === 'compile' || cmd === 'run') {
+  if (cmd === 'crawl' || cmd === 'compile' || cmd === 'run' || cmd === 'schedule') {
     out.command = cmd;
   } else {
     throw new Error(`unknown command: ${cmd}`);
   }
 
-  for (let i = 1; i < argv.length; i++) {
+  let cursor = 1;
+  if (cmd === 'schedule' && argv[1] && !argv[1].startsWith('-')) {
+    out.subcommand = argv[1];
+    cursor = 2;
+  }
+
+  for (let i = cursor; i < argv.length; i++) {
     const a = argv[i]!;
     if (a.startsWith('--')) {
       const key = a.slice(2);
@@ -226,11 +252,108 @@ export async function main(argv: string[]): Promise<number> {
     if (parsed.command === 'crawl') await commandCrawl(parsed);
     else if (parsed.command === 'compile') await commandCompile(parsed);
     else if (parsed.command === 'run') await commandRun(parsed);
+    else if (parsed.command === 'schedule') await commandSchedule(parsed);
     return 0;
   } catch (err) {
     process.stderr.write(`error: ${(err as Error).message}\n`);
     return 1;
   }
+}
+
+async function commandSchedule(args: Parsed): Promise<void> {
+  const sub = args.subcommand ?? 'list';
+  const store = new ScheduleStore(
+    args.options['base-dir'] ? { baseDir: args.options['base-dir'] as string } : {},
+  );
+
+  if (sub === 'add') return scheduleAdd(args, store);
+  if (sub === 'list') return scheduleList(store);
+  if (sub === 'remove') return scheduleRemove(args, store);
+  if (sub === 'run-due') return scheduleRunDue(args, store);
+  if (sub === 'daemon') return scheduleDaemon(args, store);
+  throw new Error(`schedule: unknown subcommand "${sub}"`);
+}
+
+async function scheduleAdd(args: Parsed, store: ScheduleStore): Promise<void> {
+  const configPath = args.options['config'] as string | undefined;
+  const every = args.options['every'] as string | undefined;
+  if (!configPath) throw new Error('schedule add: --config <path> is required');
+  if (!every) throw new Error('schedule add: --every <duration> is required (e.g. 6h)');
+
+  const intervalMs = parseDuration(every);
+  const now = new Date();
+  const id = (args.options['id'] as string | undefined) ?? `s-${randomUUID().slice(0, 8)}`;
+  const entry: ScheduleEntry = {
+    id,
+    configPath: resolve(configPath),
+    intervalMs,
+    outDir: (args.options['out-dir'] as string | undefined) ?? '.',
+    format: (args.options['out'] as 'json' | 'csv' | 'md' | undefined) ?? 'json',
+    createdAt: now.toISOString(),
+    nextRunAt: new Date(now.getTime() + intervalMs).toISOString(),
+  };
+  await store.add(entry);
+  process.stdout.write(
+    `scheduled ${id} every ${formatDuration(intervalMs)} (next: ${entry.nextRunAt})\n`,
+  );
+}
+
+async function scheduleList(store: ScheduleStore): Promise<void> {
+  const entries = await store.list();
+  if (entries.length === 0) {
+    process.stdout.write('no schedules\n');
+    return;
+  }
+  for (const e of entries) {
+    const last = e.lastRunAt ? `last=${e.lastRunAt}` : 'last=never';
+    process.stdout.write(
+      `${e.id}\tevery ${formatDuration(e.intervalMs)}\tnext=${e.nextRunAt}\t${last}\tconfig=${e.configPath}\n`,
+    );
+  }
+}
+
+async function scheduleRemove(args: Parsed, store: ScheduleStore): Promise<void> {
+  const id = args.positional[0];
+  if (!id) throw new Error('schedule remove: missing <id>');
+  const removed = await store.remove(id);
+  process.stdout.write(removed ? `removed ${id}\n` : `no such schedule: ${id}\n`);
+}
+
+async function scheduleRunDue(args: Parsed, store: ScheduleStore): Promise<void> {
+  const scheduler = buildScheduler(args, store);
+  const results = await scheduler.runDueOnce();
+  if (results.length === 0) {
+    process.stdout.write('nothing due\n');
+    return;
+  }
+  for (const r of results) {
+    if (r.ok) process.stdout.write(`ok\t${r.scheduleId}\t→ ${r.outputPath}\n`);
+    else process.stdout.write(`fail\t${r.scheduleId}\t${r.error}\n`);
+  }
+}
+
+async function scheduleDaemon(args: Parsed, store: ScheduleStore): Promise<void> {
+  const scheduler = buildScheduler(args, store);
+  const pollMs = args.options['poll'] ? parseDuration(args.options['poll'] as string) : 60_000;
+  process.stdout.write(`daemon polling every ${formatDuration(pollMs)} (Ctrl-C to exit)\n`);
+
+  const ac = new AbortController();
+  const stop = () => ac.abort();
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+
+  await scheduler.runDaemon(pollMs, ac.signal);
+}
+
+function buildScheduler(args: Parsed, store: ScheduleStore): Scheduler {
+  const userAgent = (args.options['user-agent'] as string) ?? 'craiwl/0.1';
+  return new Scheduler({
+    store,
+    fetcherFactory: () => new Tier0Fetcher({ userAgent }),
+    robotsCacheFactory: (fetcher) => new RobotsCache({ fetcher }),
+    userAgent,
+    log: (line) => process.stderr.write(`${line}\n`),
+  });
 }
 
 // Entrypoint: only run when invoked directly, not when imported in tests.

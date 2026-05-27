@@ -39,6 +39,20 @@ describe('parseArgs', () => {
   it('rejects unknown short flags', () => {
     expect(() => parseArgs(['crawl', 'https://x.com', '-x'])).toThrow();
   });
+
+  it('parses schedule subcommands', () => {
+    const add = parseArgs(['schedule', 'add', '--config', 'c.json', '--every', '6h']);
+    expect(add.command).toBe('schedule');
+    expect(add.subcommand).toBe('add');
+    expect(add.options['every']).toBe('6h');
+
+    const list = parseArgs(['schedule', 'list']);
+    expect(list.subcommand).toBe('list');
+
+    const remove = parseArgs(['schedule', 'remove', 'sched-id']);
+    expect(remove.subcommand).toBe('remove');
+    expect(remove.positional[0]).toBe('sched-id');
+  });
 });
 
 describe('main', () => {
