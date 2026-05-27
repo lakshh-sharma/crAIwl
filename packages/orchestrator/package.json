@@ -21,7 +21,8 @@
     "@craiwl/fetcher": "workspace:*",
     "fast-xml-parser": "^5.8.0",
     "jsdom": "^29.1.1",
-    "undici": "^8.3.0"
+    "undici": "^8.3.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/jsdom": "^28.0.3"
