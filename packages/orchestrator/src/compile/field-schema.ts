@@ -8,7 +8,9 @@
 import { z } from 'zod';
 import type { LLMProvider, LLMTool } from '@craiwl/core';
 
-export const fieldType = z.enum(['string', 'number', 'boolean', 'url', 'date', 'array']);
+// Mirrors the StrategyConfig FieldSpec.type enum exactly so the schema
+// flows straight into config emission without a translation step.
+export const fieldType = z.enum(['string', 'number', 'integer', 'boolean', 'date', 'url']);
 export type FieldType = z.infer<typeof fieldType>;
 
 export const fieldSchemaItem = z.object({
@@ -45,8 +47,11 @@ const SYSTEM_PROMPT = `You are designing the OUTPUT SCHEMA for a web extraction 
 Given a natural-language goal and (optionally) a small page excerpt, produce a list of fields the user wants extracted from each record on the page.
 
 Rules:
-- Use lowercase snake_case for field names.
-- Choose the narrowest type that fits: string, number, boolean, url, date, or array.
+- Use lowercase kebab-case for field names (e.g. "plan-name", "monthly-price").
+- Choose the narrowest type that fits: string, number, integer, boolean, date, or url.
+  Use "integer" for counts and IDs, "number" for prices/measurements, "url" for hyperlinks,
+  "date" for ISO-style dates. Multi-value lists should be modelled as separate records on a
+  multi-record page, not as an array field.
 - Mark a field required ONLY when the goal clearly demands it; default false.
 - Write a short (<= 15 words) description per field that explains WHAT the field is, not WHERE to find it.
 - Prefer 3-8 fields. Do not invent fields the goal does not imply.
@@ -66,7 +71,10 @@ const FIELD_SCHEMA_TOOL: LLMTool<z.infer<typeof inferredResponse>> = {
           type: 'object',
           properties: {
             name: { type: 'string' },
-            type: { type: 'string', enum: ['string', 'number', 'boolean', 'url', 'date', 'array'] },
+            type: {
+              type: 'string',
+              enum: ['string', 'number', 'integer', 'boolean', 'date', 'url'],
+            },
             required: { type: 'boolean' },
             description: { type: 'string' },
             inferred: { type: 'boolean' },
@@ -142,11 +150,12 @@ export async function inferFieldSchema(
 }
 
 function normalizeName(raw: string): string {
+  // StrategyConfig field keys are kebab-case slugs (^[a-z0-9][a-z0-9-]*$).
   return raw
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_\s-]/g, '')
-    .replace(/[\s-]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
+    .replace(/[\s_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }

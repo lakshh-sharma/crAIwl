@@ -8,7 +8,7 @@ describe('inferFieldSchema', () => {
   it('returns the LLM-proposed fields when the user supplies none', async () => {
     const llm = respondWith([
       {
-        name: 'plan_name',
+        name: 'plan-name',
         type: 'string',
         required: true,
         description: 'Name of the pricing plan.',
@@ -23,14 +23,14 @@ describe('inferFieldSchema', () => {
       },
     ]);
     const r = await inferFieldSchema(llm, { goal: 'extract pricing plans' });
-    expect(r.fields.map((f) => f.name)).toEqual(['plan_name', 'price']);
+    expect(r.fields.map((f) => f.name)).toEqual(['plan-name', 'price']);
     expect(r.fields.every((f) => f.inferred)).toBe(true);
   });
 
   it('layers user-specified fields on top of inferred ones, user wins on name collisions', async () => {
     const llm = respondWith([
       {
-        name: 'plan_name',
+        name: 'plan-name',
         type: 'string',
         required: true,
         description: 'inferred description',
@@ -47,13 +47,17 @@ describe('inferFieldSchema', () => {
     const r = await inferFieldSchema(llm, {
       goal: 'pricing plans',
       userFields: [
-        { name: 'plan_name', type: 'string', required: true, description: 'plan title' },
-        { name: 'features', type: 'array' },
+        { name: 'plan-name', type: 'string', required: true, description: 'plan title' },
+        { name: 'feature-count', type: 'integer' },
       ],
     });
     const byName = Object.fromEntries(r.fields.map((f) => [f.name, f]));
-    expect(byName['plan_name']).toMatchObject({ inferred: false, description: 'plan title' });
-    expect(byName['features']).toMatchObject({ inferred: false, type: 'array', required: false });
+    expect(byName['plan-name']).toMatchObject({ inferred: false, description: 'plan title' });
+    expect(byName['feature-count']).toMatchObject({
+      inferred: false,
+      type: 'integer',
+      required: false,
+    });
     expect(byName['price']).toMatchObject({ inferred: true });
   });
 
@@ -63,7 +67,7 @@ describe('inferFieldSchema', () => {
       { name: 'price-USD', type: 'number', required: false, description: 'price', inferred: true },
     ]);
     const r = await inferFieldSchema(llm, { goal: 'pricing' });
-    expect(r.fields.map((f) => f.name)).toEqual(['plan_name', 'price_usd']);
+    expect(r.fields.map((f) => f.name)).toEqual(['plan-name', 'price-usd']);
   });
 
   it('includes page context in the prompt when provided', async () => {
@@ -121,9 +125,9 @@ describe('inferFieldSchema', () => {
       goal: 'x',
       userFields: [
         { name: 'Plan Name', type: 'string' },
-        { name: 'plan_name', type: 'string' }, // same normalized
+        { name: 'plan-name', type: 'string' }, // same normalized
       ],
     });
-    expect(r.fields.filter((f) => f.name === 'plan_name')).toHaveLength(1);
+    expect(r.fields.filter((f) => f.name === 'plan-name')).toHaveLength(1);
   });
 });

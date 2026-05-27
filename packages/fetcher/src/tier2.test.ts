@@ -61,12 +61,13 @@ describe('Tier2Fetcher', () => {
 
   it('records the elapsed timing', async () => {
     const provider = mockProvider(async () => {
-      await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => setTimeout(r, 25));
       return { html: '<html></html>', finalUrl: 'x', status: 200, actionsApplied: 0 };
     });
     const fetcher = new Tier2Fetcher({ provider });
     const res = await fetcher.fetch('https://example.com/');
-    expect(res.timingMs).toBeGreaterThanOrEqual(10);
+    // Generous lower bound — setTimeout precision varies across CI vs local.
+    expect(res.timingMs).toBeGreaterThanOrEqual(15);
   });
 });
 
