@@ -1,16 +1,15 @@
 /**
  * Sitemap discovery + parsing.
  *
- * Sitemaps are the cheapest, most reliable URL source for a crawl. We seed
- * from robots.txt (if available) plus the conventional `/sitemap.xml`, then
- * follow `<sitemapindex>` chains up to a bounded depth, decoding `.gz`
+ * Seeds from robots.txt (if available) plus the conventional `/sitemap.xml`,
+ * follows `<sitemapindex>` chains up to a bounded depth, and decodes `.gz`
  * payloads in-process. URLs are deduplicated by a lightweight canonical
- * form — full canonicalization (CRAWL-076) happens later in the pipeline.
+ * form; the full canonicalizer lives in the crawl loop.
  *
- * This module deliberately uses `undici.request` directly rather than the
- * shared `Fetcher` abstraction because gzip sitemaps arrive as binary and
- * `FetchResult.body` is `string`. The trade-off is intentional: sitemap
- * discovery does not need tier escalation.
+ * This module uses `undici.fetch` directly rather than the shared `Fetcher`
+ * abstraction because gzip sitemaps arrive as binary and `FetchResult.body`
+ * is `string`. Sitemap discovery does not need tier escalation, so the
+ * trade-off is fine.
  */
 
 import { gunzipSync } from 'node:zlib';
