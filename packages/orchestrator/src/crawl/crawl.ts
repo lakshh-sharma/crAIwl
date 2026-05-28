@@ -18,11 +18,17 @@
 import { JSDOM } from 'jsdom';
 import { cleanHtml, execute, type ExtractedRecord } from '@craiwl/extractor';
 import type { Fetcher, RobotsCache } from '@craiwl/fetcher';
-import type { StrategyConfig } from '@craiwl/core';
+import type { LLMProvider, StrategyConfig } from '@craiwl/core';
 import { Frontier } from './frontier.js';
 import { PolitenessGate, type PolitenessOptions } from './politeness.js';
 import { RobotsPolicyChecker, type AuditEvent, type RobotsPolicy } from './robots-policy.js';
 import { type CrawlScopeMode } from './canonicalize.js';
+import {
+  healPageFailures,
+  RedesignDetector,
+  RepairBudget,
+  type RepairAttempt,
+} from '../self-heal/index.js';
 
 export type CrawlSiteOptions = {
   entryUrl: string;
@@ -48,6 +54,15 @@ export type CrawlSiteOptions = {
   onProgress?: (p: CrawlProgress) => void;
   /** Caller-controlled cancellation. */
   signal?: AbortSignal;
+  /** Enable per-field repair on extraction failures. Requires an LLM. */
+  selfHeal?: {
+    llm: LLMProvider;
+    /** Max total repair LLM calls across the whole crawl. Default 20. */
+    maxRepairs?: number;
+    /** Detector tuning — see RedesignDetector. */
+    redesignThresholdRatio?: number;
+    redesignMinPages?: number;
+  };
   /** Test seam: clock. */
   now?: () => Date;
 };
@@ -74,6 +89,21 @@ export type CrawlSiteResult = {
   auditEvents: AuditEvent[];
   startedAt: string;
   finishedAt: string;
+  /**
+   * The config the crawl finished with. Differs from the input only when
+   * self-heal patched a locator at runtime — the new version has
+   * reason='self-heal' and the repaired locator appended.
+   */
+  finalConfig: StrategyConfig;
+  /** Per-page repair attempts (success and failure). Empty when self-heal is off. */
+  repairs: Array<{ url: string; attempts: RepairAttempt[] }>;
+  /**
+   * Trips when too many crawled pages needed repairs. Surfaces "site-wide
+   * redesign — recompile the templates" rather than per-field thrashing.
+   */
+  likelyRedesign: boolean;
+  /** Total LLM tokens spent on self-heal. */
+  selfHealUsage: { inputTokens: number; outputTokens: number };
 };
 
 const DEFAULT_MAX_PAGES = 50;
@@ -102,6 +132,24 @@ export async function crawlSite(opts: CrawlSiteOptions): Promise<CrawlSiteResult
     onAudit: (e) => auditEvents.push(e),
   });
   const followLinks = opts.followLinks ?? true;
+
+  // Self-heal state: the config mutates across pages — a repair on page 3
+  // protects pages 4..N from paying the same repair tokens. Budget + detector
+  // are crawl-wide.
+  let currentConfig: StrategyConfig = opts.config;
+  const repairs: Array<{ url: string; attempts: RepairAttempt[] }> = [];
+  const selfHealUsage = { inputTokens: 0, outputTokens: 0 };
+  const repairBudget = opts.selfHeal ? new RepairBudget(opts.selfHeal.maxRepairs ?? 20) : null;
+  const redesignDetector = opts.selfHeal
+    ? new RedesignDetector({
+        ...(opts.selfHeal.redesignThresholdRatio !== undefined
+          ? { thresholdRatio: opts.selfHeal.redesignThresholdRatio }
+          : {}),
+        ...(opts.selfHeal.redesignMinPages !== undefined
+          ? { minPages: opts.selfHeal.redesignMinPages }
+          : {}),
+      })
+    : null;
 
   // Seed the frontier with the entry URL plus any discovery results.
   const seedEntries: Array<{ url: string; depth: number; source: 'seed' | 'discovery' }> = [
@@ -153,12 +201,40 @@ export async function crawlSite(opts: CrawlSiteOptions): Promise<CrawlSiteResult
       }
 
       const cleaned = cleanHtml(res.body);
-      const extraction = execute({
+      let extraction = execute({
         cleanedHtml: cleaned.html,
-        config: opts.config,
+        config: currentConfig,
         sourceUrl: res.finalUrl || next.url,
         now,
       });
+
+      // Self-heal: when execute reports any failure and the caller wired up
+      // a repair LLM, try a per-field repair pass. A successful repair
+      // updates currentConfig so subsequent pages reuse the healed locator
+      // without paying for repair again.
+      if (opts.selfHeal && repairBudget && redesignDetector) {
+        const hadFailures = extraction.failureCount > 0;
+        redesignDetector.notePage(hadFailures);
+        if (hadFailures && !redesignDetector.likelyRedesign) {
+          const heal = await healPageFailures({
+            config: currentConfig,
+            cleanedHtml: cleaned.html,
+            sourceUrl: res.finalUrl || next.url,
+            execution: extraction,
+            llm: opts.selfHeal.llm,
+            budget: repairBudget,
+            now,
+          });
+          if (heal.attempts.length > 0) {
+            repairs.push({ url: next.url, attempts: heal.attempts });
+            selfHealUsage.inputTokens += heal.usage.inputTokens;
+            selfHealUsage.outputTokens += heal.usage.outputTokens;
+          }
+          currentConfig = heal.config;
+          extraction = heal.execution;
+        }
+      }
+
       records.push(...extraction.records);
       pageResult = { url: next.url, status: res.status, records: extraction.records };
       pagesPerUrl.push(pageResult);
@@ -201,6 +277,10 @@ export async function crawlSite(opts: CrawlSiteOptions): Promise<CrawlSiteResult
     auditEvents,
     startedAt,
     finishedAt: now().toISOString(),
+    finalConfig: currentConfig,
+    repairs,
+    likelyRedesign: redesignDetector?.likelyRedesign ?? false,
+    selfHealUsage,
   };
 }
 

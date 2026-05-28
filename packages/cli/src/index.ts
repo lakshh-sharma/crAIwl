@@ -56,6 +56,8 @@ COMMON OPTIONS
   --user-agent <s>        UA string (default: craiwl/0.1)
   --robots respect|warn|ignore  robots.txt policy (default: respect)
   --no-follow-links       seed only — do not enqueue on-page links
+  --self-heal             on locator failures, re-invoke LLM to repair (requires ANTHROPIC_API_KEY)
+  --max-repairs <n>       cap on repair LLM calls per crawl (default: 20)
 
 SCHEDULE OPTIONS
   --every <duration>      interval, e.g. 30m, 6h, 1d
@@ -169,6 +171,15 @@ async function commandCrawl(args: Parsed): Promise<void> {
       ? { robotsPolicy: args.options['robots'] as 'respect' | 'warn' | 'ignore' }
       : {}),
     ...(args.options['no-follow-links'] ? { followLinks: false } : {}),
+    ...(args.options['self-heal']
+      ? {
+          selfHeal: {
+            ...(args.options['max-repairs']
+              ? { maxRepairs: Number(args.options['max-repairs']) }
+              : {}),
+          },
+        }
+      : {}),
   });
 
   const format = (args.options['out'] as string) ?? 'json';
@@ -213,6 +224,9 @@ async function commandRun(args: Parsed): Promise<void> {
   const userAgent = (args.options['user-agent'] as string) ?? 'craiwl/0.1';
   const fetcher = new Tier0Fetcher({ userAgent });
   const robotsCache = buildRobotsCache(fetcher);
+  // The LLM is only needed for self-heal in `run` — compile is already done.
+  const selfHealOn = Boolean(args.options['self-heal']);
+  const llm = selfHealOn ? new AnthropicProvider() : undefined;
 
   const result = await runJob({
     entryUrl: config.target.entryUrl,
@@ -221,12 +235,22 @@ async function commandRun(args: Parsed): Promise<void> {
     robotsCache,
     userAgent,
     config,
+    ...(llm ? { llm } : {}),
     ...(args.options['scope']
       ? { scope: args.options['scope'] as 'single' | 'section' | 'site' }
       : {}),
     ...(args.options['max-pages'] ? { maxPages: Number(args.options['max-pages']) } : {}),
     ...(args.options['robots']
       ? { robotsPolicy: args.options['robots'] as 'respect' | 'warn' | 'ignore' }
+      : {}),
+    ...(selfHealOn
+      ? {
+          selfHeal: {
+            ...(args.options['max-repairs']
+              ? { maxRepairs: Number(args.options['max-repairs']) }
+              : {}),
+          },
+        }
       : {}),
   });
 

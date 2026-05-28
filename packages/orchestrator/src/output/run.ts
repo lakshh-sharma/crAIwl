@@ -34,6 +34,8 @@ export type RunJobOptions = {
   maxDepth?: number;
   robotsPolicy?: 'respect' | 'warn' | 'ignore';
   followLinks?: boolean;
+  /** Enable self-heal during the crawl. Reuses `llm` for repair calls. */
+  selfHeal?: { maxRepairs?: number };
   /** Override clock for deterministic runs in tests. */
   now?: () => Date;
   /** Override the run id (defaults to a fresh UUID). */
@@ -92,6 +94,16 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
     ...(opts.maxDepth !== undefined ? { maxDepth: opts.maxDepth } : {}),
     ...(opts.robotsPolicy ? { robotsPolicy: opts.robotsPolicy } : {}),
     ...(opts.followLinks !== undefined ? { followLinks: opts.followLinks } : {}),
+    ...(opts.selfHeal && opts.llm
+      ? {
+          selfHeal: {
+            llm: opts.llm,
+            ...(opts.selfHeal.maxRepairs !== undefined
+              ? { maxRepairs: opts.selfHeal.maxRepairs }
+              : {}),
+          },
+        }
+      : {}),
     now,
   });
 
