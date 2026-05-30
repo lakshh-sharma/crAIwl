@@ -94,6 +94,68 @@ describe('Scheduler', () => {
     const updated = (await store.list())[0]!;
     expect(updated.lastRunAt).toBe('2026-01-15T12:00:00.000Z');
     expect(updated.nextRunAt).toBe('2026-01-15T12:01:00.000Z');
+    // First run captures lastRunId so the next tick can diff against it.
+    expect(updated.lastRunId).toBe(results[0]!.result!.runId);
+  });
+
+  it('diffs the second run against the first and writes the diff file', async () => {
+    const { store } = await setupStore();
+    const configPath = join(store.baseDir, 'config.json');
+    await writeFile(configPath, exportConfig(cfg), 'utf8');
+
+    // First run.
+    const yesterday = new Date('2026-05-28T12:00:00.000Z').toISOString();
+    await store.add({
+      id: 's-diff',
+      configPath,
+      intervalMs: 60_000,
+      outDir: store.baseDir,
+      format: 'json',
+      createdAt: yesterday,
+      nextRunAt: yesterday,
+    });
+
+    let title = 'Hello';
+    const dynamicFetcher: Fetcher = {
+      tier: 'static',
+      fetch: async (url) => {
+        if (url.endsWith('/robots.txt')) return ok('');
+        return ok(`<!doctype html><html><body><main><h1>${title}</h1></main></body></html>`);
+      },
+    };
+
+    const scheduler1 = new Scheduler({
+      store,
+      fetcherFactory: () => dynamicFetcher,
+      robotsCacheFactory: (f) => new RobotsCache({ fetcher: f }),
+      userAgent: 'craiwl-test',
+      now: () => new Date('2026-05-29T12:00:00.000Z'),
+    });
+    const first = await scheduler1.runDueOnce();
+    expect(first).toHaveLength(1);
+    // First run has nothing to diff against.
+    expect(first[0]!.diffPath).toBeUndefined();
+    expect(first[0]!.result!.diff).toBeUndefined();
+
+    // Now the page changes and the second run is due.
+    title = 'Hello World';
+    // Force the next run to be due immediately.
+    const after = await store.list();
+    await store.update({ ...after[0]!, nextRunAt: '2026-05-29T12:00:00.000Z' });
+
+    const scheduler2 = new Scheduler({
+      store,
+      fetcherFactory: () => dynamicFetcher,
+      robotsCacheFactory: (f) => new RobotsCache({ fetcher: f }),
+      userAgent: 'craiwl-test',
+      now: () => new Date('2026-05-30T12:00:00.000Z'),
+    });
+    const second = await scheduler2.runDueOnce();
+    expect(second).toHaveLength(1);
+    expect(second[0]!.diffPath).toMatch(/runs\/run-.*\.diff\.json$/);
+    const diff = second[0]!.result!.diff!;
+    // The single record changed (title differs).
+    expect(diff.changed.length + diff.added.length).toBeGreaterThan(0);
   });
 
   it('leaves not-yet-due entries alone', async () => {

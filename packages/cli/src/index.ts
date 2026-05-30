@@ -58,6 +58,7 @@ COMMON OPTIONS
   --no-follow-links       seed only — do not enqueue on-page links
   --self-heal             on locator failures, re-invoke LLM to repair (requires ANTHROPIC_API_KEY)
   --max-repairs <n>       cap on repair LLM calls per crawl (default: 20)
+  --diff-against <path>   path to a previous run's records.json — emit a record diff
 
 SCHEDULE OPTIONS
   --every <duration>      interval, e.g. 30m, 6h, 1d
@@ -144,6 +145,15 @@ function buildRobotsCache(fetcher: Fetcher): RobotsCache {
   return new RobotsCache({ fetcher });
 }
 
+async function readPreviousRecords(path: string) {
+  const raw = await readFile(path, 'utf8');
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error(`--diff-against: ${path} is not an array of records`);
+  }
+  return parsed;
+}
+
 async function commandCrawl(args: Parsed): Promise<void> {
   const url = args.positional[0];
   const goal = args.options['goal'];
@@ -228,6 +238,9 @@ async function commandRun(args: Parsed): Promise<void> {
   const selfHealOn = Boolean(args.options['self-heal']);
   const llm = selfHealOn ? new AnthropicProvider() : undefined;
 
+  const diffAgainst = args.options['diff-against'] as string | undefined;
+  const previousRecords = diffAgainst ? await readPreviousRecords(diffAgainst) : undefined;
+
   const result = await runJob({
     entryUrl: config.target.entryUrl,
     goal: config.goal,
@@ -252,7 +265,14 @@ async function commandRun(args: Parsed): Promise<void> {
           },
         }
       : {}),
+    ...(previousRecords ? { previousRecords } : {}),
   });
+
+  if (result.diff) {
+    process.stderr.write(
+      `diff: +${result.diff.added.length} added · -${result.diff.removed.length} removed · ~${result.diff.changed.length} changed · ${result.diff.unchangedCount} unchanged\n`,
+    );
+  }
 
   const format = (args.options['out'] as string) ?? 'json';
   await emit(serialize(result, format), args.options['output-file'] as string | undefined);

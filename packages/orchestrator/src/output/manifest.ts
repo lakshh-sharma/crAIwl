@@ -9,6 +9,7 @@
 
 import type { ExtractedRecord } from '@craiwl/extractor';
 import type { StrategyConfig } from '@craiwl/core';
+import type { RunCostBreakdown } from '../cost/index.js';
 
 export type RunManifest = {
   runId: string;
@@ -33,6 +34,8 @@ export type RunManifest = {
   };
   /** % of records where each field was successfully extracted, keyed by `<templateId>.<fieldName>`. */
   fieldCoverage: Record<string, number>;
+  /** LLM + page + wall-clock cost breakdown for this run. */
+  cost: RunCostBreakdown;
 };
 
 export type BuildManifestInput = {
@@ -46,6 +49,7 @@ export type BuildManifestInput = {
   pagesCrawled: number;
   pagesSkipped: number;
   pagesFailed: number;
+  cost: RunCostBreakdown;
 };
 
 export function buildManifest(input: BuildManifestInput): RunManifest {
@@ -71,6 +75,7 @@ export function buildManifest(input: BuildManifestInput): RunManifest {
       pagesFailed: input.pagesFailed,
     },
     fieldCoverage: computeCoverage(input.records),
+    cost: input.cost,
   };
 }
 

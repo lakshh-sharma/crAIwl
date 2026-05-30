@@ -17,7 +17,7 @@
 
 import { JSDOM } from 'jsdom';
 import { cleanHtml, execute, type ExtractedRecord } from '@craiwl/extractor';
-import type { Fetcher, RobotsCache } from '@craiwl/fetcher';
+import type { Fetcher, FetchTier, RobotsCache } from '@craiwl/fetcher';
 import type { LLMProvider, StrategyConfig } from '@craiwl/core';
 import { Frontier } from './frontier.js';
 import { PolitenessGate, type PolitenessOptions } from './politeness.js';
@@ -78,6 +78,10 @@ export type CrawlPageResult = {
   url: string;
   status: number;
   records: ExtractedRecord[];
+  /** Which fetch tier served this URL. */
+  tierUsed: FetchTier;
+  /** Time the fetch took (ms), useful for p50/p95 latency reporting. */
+  timingMs: number;
 };
 
 export type CrawlSiteResult = {
@@ -102,8 +106,8 @@ export type CrawlSiteResult = {
    * redesign — recompile the templates" rather than per-field thrashing.
    */
   likelyRedesign: boolean;
-  /** Total LLM tokens spent on self-heal. */
-  selfHealUsage: { inputTokens: number; outputTokens: number };
+  /** Total LLM tokens spent on self-heal, plus the call count. */
+  selfHealUsage: { calls: number; inputTokens: number; outputTokens: number };
 };
 
 const DEFAULT_MAX_PAGES = 50;
@@ -138,7 +142,7 @@ export async function crawlSite(opts: CrawlSiteOptions): Promise<CrawlSiteResult
   // are crawl-wide.
   let currentConfig: StrategyConfig = opts.config;
   const repairs: Array<{ url: string; attempts: RepairAttempt[] }> = [];
-  const selfHealUsage = { inputTokens: 0, outputTokens: 0 };
+  const selfHealUsage = { calls: 0, inputTokens: 0, outputTokens: 0 };
   const repairBudget = opts.selfHeal ? new RepairBudget(opts.selfHeal.maxRepairs ?? 20) : null;
   const redesignDetector = opts.selfHeal
     ? new RedesignDetector({
@@ -227,6 +231,10 @@ export async function crawlSite(opts: CrawlSiteOptions): Promise<CrawlSiteResult
           });
           if (heal.attempts.length > 0) {
             repairs.push({ url: next.url, attempts: heal.attempts });
+            // Budget-exhausted attempts never hit the LLM — don't bill them.
+            selfHealUsage.calls += heal.attempts.filter(
+              (a) => a.ok || a.reason !== 'budget-exhausted',
+            ).length;
             selfHealUsage.inputTokens += heal.usage.inputTokens;
             selfHealUsage.outputTokens += heal.usage.outputTokens;
           }
@@ -236,7 +244,13 @@ export async function crawlSite(opts: CrawlSiteOptions): Promise<CrawlSiteResult
       }
 
       records.push(...extraction.records);
-      pageResult = { url: next.url, status: res.status, records: extraction.records };
+      pageResult = {
+        url: next.url,
+        status: res.status,
+        records: extraction.records,
+        tierUsed: res.tierUsed,
+        timingMs: res.timingMs,
+      };
       pagesPerUrl.push(pageResult);
 
       // 3. Link discovery — only when enabled and we still have depth budget.

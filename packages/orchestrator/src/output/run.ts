@@ -16,6 +16,7 @@ import type { LLMProvider, StrategyConfig } from '@craiwl/core';
 import { compile, type UserField } from '../compile/index.js';
 import { crawlSite, type CrawlSiteResult } from '../crawl/index.js';
 import type { CrawlScopeMode } from '../crawl/canonicalize.js';
+import { computeRunCost, diffRuns, type RunCostBreakdown, type RunDiff } from '../cost/index.js';
 import { buildManifest, type RunManifest } from './manifest.js';
 
 export type RunJobOptions = {
@@ -36,6 +37,8 @@ export type RunJobOptions = {
   followLinks?: boolean;
   /** Enable self-heal during the crawl. Reuses `llm` for repair calls. */
   selfHeal?: { maxRepairs?: number };
+  /** Previous-run records to diff against. Returns a populated `diff` field. */
+  previousRecords?: ExtractedRecord[];
   /** Override clock for deterministic runs in tests. */
   now?: () => Date;
   /** Override the run id (defaults to a fresh UUID). */
@@ -50,6 +53,9 @@ export type RunJobResult = {
   cleanRecords: ExtractedRecord[];
   reviewRecords: ExtractedRecord[];
   manifest: RunManifest;
+  cost: RunCostBreakdown;
+  /** Populated when the caller supplied `previousRecords`. */
+  diff?: RunDiff;
 };
 
 export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
@@ -59,6 +65,9 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
   // 1. Get a config. Either use one the caller provided, or compile one from
   //    the entry page.
   let config: StrategyConfig;
+  const compileUsage = { calls: 0, inputTokens: 0, outputTokens: 0 };
+  let compileModel = opts.config?.createdBy ?? 'unknown';
+
   if (opts.config) {
     config = opts.config;
   } else {
@@ -80,6 +89,11 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
       now,
     });
     config = compileResult.config;
+    // Compile makes 2 LLM calls (field-schema + locator-synthesis).
+    compileUsage.calls = 2;
+    compileUsage.inputTokens = compileResult.usage.inputTokens;
+    compileUsage.outputTokens = compileResult.usage.outputTokens;
+    compileModel = compileResult.model;
   }
 
   // 2. Crawl.
@@ -119,7 +133,22 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
     config.confidenceFloor,
   );
 
-  // 4. Build the manifest.
+  // 4. Cost accounting.
+  const cost = computeRunCost({
+    compile: compileUsage,
+    selfHeal: {
+      calls: crawl.selfHealUsage.calls,
+      inputTokens: crawl.selfHealUsage.inputTokens,
+      outputTokens: crawl.selfHealUsage.outputTokens,
+    },
+    model: compileModel,
+    pages: crawl.pagesPerUrl.map((p) => ({ tier: p.tierUsed, timingMs: p.timingMs })),
+    startedAt: crawl.startedAt,
+    finishedAt: crawl.finishedAt,
+    recordCount: crawl.records.length,
+  });
+
+  // 5. Build the manifest (now carries cost).
   const manifest = buildManifest({
     runId,
     startedAt: crawl.startedAt,
@@ -131,7 +160,11 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
     pagesCrawled: crawl.pagesCrawled,
     pagesSkipped: crawl.skipped.length,
     pagesFailed: crawl.failures.length,
+    cost,
   });
+
+  // 6. Optional diff against a previous run.
+  const diff = opts.previousRecords ? diffRuns(opts.previousRecords, crawl.records) : undefined;
 
   return {
     runId,
@@ -141,5 +174,7 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
     cleanRecords: partition.clean,
     reviewRecords: partition.review,
     manifest,
+    cost,
+    ...(diff ? { diff } : {}),
   };
 }

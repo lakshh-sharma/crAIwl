@@ -69,6 +69,7 @@ export function serializeAsMarkdown(
     `- **Config**: \`${manifest.config.createdBy}\` v${manifest.config.version}`,
     `- **Pages crawled**: ${manifest.counts.pagesCrawled} (${manifest.counts.pagesSkipped} skipped, ${manifest.counts.pagesFailed} failed)`,
     `- **Records**: ${manifest.counts.recordsTotal} (${manifest.counts.recordsClean} clean, ${manifest.counts.recordsReview} review)`,
+    `- **Cost**: $${manifest.cost.llm.estimatedUsd.toFixed(4)} — ${manifest.cost.llm.totalCalls} LLM call(s), ${manifest.cost.llm.inputTokens} in / ${manifest.cost.llm.outputTokens} out`,
   ].join('\n');
 
   if (records.length === 0) {

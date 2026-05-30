@@ -25,6 +25,26 @@ const manifest: RunManifest = {
     pagesFailed: 0,
   },
   fieldCoverage: { 'pricing.plan-name': 1, 'pricing.price': 1 },
+  cost: {
+    llm: {
+      totalCalls: 2,
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedUsd: 0,
+      model: 'mock-llm',
+      byPhase: {
+        compile: { calls: 2, inputTokens: 0, outputTokens: 0, estimatedUsd: 0 },
+        selfHeal: { calls: 0, inputTokens: 0, outputTokens: 0, estimatedUsd: 0 },
+      },
+    },
+    pages: { total: 1, byTier: { static: 1 }, totalFetchTimeMs: 50 },
+    wallClock: {
+      totalMs: 10_000,
+      startedAt: '2026-01-15T12:00:00.000Z',
+      finishedAt: '2026-01-15T12:00:10.000Z',
+    },
+    records: { total: 2, perKToken: 0 },
+  },
 };
 
 const records: ExtractedRecord[] = [

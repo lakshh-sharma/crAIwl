@@ -17,6 +17,8 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import type { ExtractedRecord } from '@craiwl/extractor';
+import type { RunDiff } from '../cost/index.js';
 
 export type ScheduleEntry = {
   id: string;
@@ -30,6 +32,8 @@ export type ScheduleEntry = {
   format: 'json' | 'csv' | 'md';
   createdAt: string;
   lastRunAt?: string;
+  /** Run id of the most recent successful run — keyed for diff lookups. */
+  lastRunId?: string;
   /** Next scheduled fire time (ISO). */
   nextRunAt: string;
 };
@@ -109,6 +113,36 @@ export class ScheduleStore {
     await this.ensureDirs();
     const path = this.runOutputPath(runId, extension);
     await writeFile(path, body, 'utf8');
+    return path;
+  }
+
+  /**
+   * Persist the raw record list for a run. The diff between scheduled runs
+   * keys off this rather than the formatted output so reformatting changes
+   * don't leak into diff results.
+   */
+  async writeRunRecords(runId: string, records: ExtractedRecord[]): Promise<string> {
+    await this.ensureDirs();
+    const path = join(this.baseDir, RUNS_DIR, `${runId}.records.json`);
+    await writeFile(path, `${JSON.stringify(records, null, 2)}\n`, 'utf8');
+    return path;
+  }
+
+  async readRunRecords(runId: string): Promise<ExtractedRecord[] | null> {
+    try {
+      const raw = await readFile(join(this.baseDir, RUNS_DIR, `${runId}.records.json`), 'utf8');
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as ExtractedRecord[]) : null;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
+  }
+
+  async writeRunDiff(runId: string, diff: RunDiff): Promise<string> {
+    await this.ensureDirs();
+    const path = join(this.baseDir, RUNS_DIR, `${runId}.diff.json`);
+    await writeFile(path, `${JSON.stringify(diff, null, 2)}\n`, 'utf8');
     return path;
   }
 }

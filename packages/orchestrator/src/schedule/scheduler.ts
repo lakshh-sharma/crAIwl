@@ -48,6 +48,8 @@ export type DueResult = {
   ok: boolean;
   /** Path on disk where the serialized output was written. */
   outputPath?: string;
+  /** Path on disk where the run-vs-previous diff was written (when there was a previous run). */
+  diffPath?: string;
   /** Run result on success. */
   result?: RunJobResult;
   /** Error message on failure. */
@@ -115,6 +117,11 @@ export class Scheduler {
       const fetcher = this.opts.fetcherFactory();
       const robotsCache = this.opts.robotsCacheFactory(fetcher);
 
+      // If a previous run exists, load its raw records so this run produces a diff.
+      const previousRecords = entry.lastRunId
+        ? await this.opts.store.readRunRecords(entry.lastRunId)
+        : null;
+
       const result = await runJob({
         entryUrl: config.target.entryUrl,
         goal: config.goal,
@@ -123,6 +130,7 @@ export class Scheduler {
         userAgent: this.opts.userAgent,
         config,
         now: this.now,
+        ...(previousRecords ? { previousRecords } : {}),
       });
 
       const serialized = pickSerializer(entry.format, result);
@@ -131,16 +139,30 @@ export class Scheduler {
         serialized.extension,
         serialized.body,
       );
+      // Persist raw records for the next run's diff.
+      await this.opts.store.writeRunRecords(result.runId, result.records);
 
-      // Bookkeeping: advance nextRunAt, record lastRunAt.
+      let diffPath: string | undefined;
+      if (result.diff) {
+        diffPath = await this.opts.store.writeRunDiff(result.runId, result.diff);
+      }
+
+      // Bookkeeping: advance nextRunAt, record lastRunAt + lastRunId.
       const updated: ScheduleEntry = {
         ...entry,
         lastRunAt: this.now().toISOString(),
+        lastRunId: result.runId,
         nextRunAt: new Date(this.now().getTime() + entry.intervalMs).toISOString(),
       };
       await this.opts.store.update(updated);
 
-      return { scheduleId: entry.id, ok: true, outputPath, result };
+      return {
+        scheduleId: entry.id,
+        ok: true,
+        outputPath,
+        ...(diffPath ? { diffPath } : {}),
+        result,
+      };
     } catch (err) {
       return { scheduleId: entry.id, ok: false, error: (err as Error).message };
     }
