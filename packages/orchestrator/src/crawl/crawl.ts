@@ -54,6 +54,13 @@ export type CrawlSiteOptions = {
   onProgress?: (p: CrawlProgress) => void;
   /** Caller-controlled cancellation. */
   signal?: AbortSignal;
+  /**
+   * Pre-resolved auth headers attached to every outbound request (config
+   * URL + on-page links). Resolution happens once at run start so the
+   * secret material lives in memory for the duration of the crawl and
+   * never reaches structured logs. See `core/secrets/auth.ts`.
+   */
+  authHeaders?: Record<string, string>;
   /** Enable per-field repair on extraction failures. Requires an LLM. */
   selfHeal?: {
     llm: LLMProvider;
@@ -192,7 +199,10 @@ export async function crawlSite(opts: CrawlSiteOptions): Promise<CrawlSiteResult
 
     let pageResult: CrawlPageResult | null = null;
     try {
-      const res = await opts.fetcher.fetch(next.url);
+      const res = await opts.fetcher.fetch(
+        next.url,
+        opts.authHeaders ? { headers: { ...opts.authHeaders } } : {},
+      );
       politeness.noteResponse(next.url, {
         status: res.status,
         ...(res.headers['retry-after'] ? { retryAfter: res.headers['retry-after'] } : {}),

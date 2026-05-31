@@ -12,7 +12,13 @@
 import { randomUUID } from 'node:crypto';
 import { cleanHtml, partitionByConfidence, type ExtractedRecord } from '@craiwl/extractor';
 import type { Fetcher, RobotsCache } from '@craiwl/fetcher';
-import type { LLMProvider, StrategyConfig } from '@craiwl/core';
+import {
+  resolveAuthHeaders,
+  type AuthProfile,
+  type LLMProvider,
+  type SecretsProvider,
+  type StrategyConfig,
+} from '@craiwl/core';
 import { compile, type UserField } from '../compile/index.js';
 import { crawlSite, type CrawlSiteResult } from '../crawl/index.js';
 import type { CrawlScopeMode } from '../crawl/canonicalize.js';
@@ -39,6 +45,18 @@ export type RunJobOptions = {
   selfHeal?: { maxRepairs?: number };
   /** Previous-run records to diff against. Returns a populated `diff` field. */
   previousRecords?: ExtractedRecord[];
+  /**
+   * Resolves the named secret in `config.auth` (when present) into request
+   * headers attached to every fetch. Required when the config has auth.
+   */
+  secrets?: SecretsProvider;
+  /**
+   * Auth profile to stamp onto the compiled config (only honored when
+   * runJob is doing the compile — pre-supplied configs are not mutated).
+   * Use this from the CLI flow where the user passes `--auth-*` and we
+   * have to write auth into the freshly-compiled config.
+   */
+  auth?: AuthProfile;
   /** Override clock for deterministic runs in tests. */
   now?: () => Date;
   /** Override the run id (defaults to a fresh UUID). */
@@ -62,8 +80,21 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
   const now = opts.now ?? (() => new Date());
   const runId = opts.runId ?? `run-${randomUUID()}`;
 
-  // 1. Get a config. Either use one the caller provided, or compile one from
-  //    the entry page.
+  // 1. Resolve auth headers upfront when we know we'll need them. The crawl,
+  //    the compile-time entry fetch, and any saved-config auth profile all
+  //    use the same headers — resolving once keeps the secret short-lived
+  //    in memory and centralizes the SecretsProvider dependency.
+  const pendingAuth: AuthProfile | undefined = opts.config?.auth ?? opts.auth;
+  let authHeaders: Record<string, string> | undefined;
+  if (pendingAuth) {
+    if (!opts.secrets) {
+      throw new Error('runJob: auth is configured but no SecretsProvider was supplied');
+    }
+    authHeaders = await resolveAuthHeaders(pendingAuth, opts.secrets);
+  }
+
+  // 2. Get a config. Either use one the caller provided, or compile one from
+  //    the entry page (which we fetch with the auth headers when present).
   let config: StrategyConfig;
   const compileUsage = { calls: 0, inputTokens: 0, outputTokens: 0 };
   let compileModel = opts.config?.createdBy ?? 'unknown';
@@ -74,7 +105,10 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
     if (!opts.llm) {
       throw new Error('runJob: either `config` or `llm` must be provided');
     }
-    const entryRes = await opts.fetcher.fetch(opts.entryUrl);
+    const entryRes = await opts.fetcher.fetch(
+      opts.entryUrl,
+      authHeaders ? { headers: { ...authHeaders } } : {},
+    );
     if (entryRes.status >= 400) {
       throw new Error(`runJob: entry URL returned http-${entryRes.status}`);
     }
@@ -94,15 +128,22 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
     compileUsage.inputTokens = compileResult.usage.inputTokens;
     compileUsage.outputTokens = compileResult.usage.outputTokens;
     compileModel = compileResult.model;
+
+    // Stamp the CLI-supplied auth profile onto the freshly-compiled config
+    // so subsequent saves persist it.
+    if (opts.auth) {
+      config = { ...config, auth: opts.auth };
+    }
   }
 
-  // 2. Crawl.
+  // 3. Crawl.
   const crawl = await crawlSite({
     entryUrl: opts.entryUrl,
     config,
     fetcher: opts.fetcher,
     robotsCache: opts.robotsCache,
     userAgent: opts.userAgent,
+    ...(authHeaders ? { authHeaders } : {}),
     ...(opts.scope ? { scope: opts.scope } : {}),
     ...(opts.maxPages !== undefined ? { maxPages: opts.maxPages } : {}),
     ...(opts.maxDepth !== undefined ? { maxDepth: opts.maxDepth } : {}),

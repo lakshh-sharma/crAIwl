@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { STRATEGY_CONFIG_VERSION } from './version.js';
 import { validateExpression } from './expression.js';
 import { validateTransformPipeline } from './transforms.js';
+import { authProfile } from '../secrets/auth.js';
 
 /**
  * StrategyConfig — the compiled extraction program. See
@@ -198,6 +199,12 @@ export const strategyConfig = z
     pagination: pagination.default({ type: 'none' }),
     fetchProfile,
     confidenceFloor: confidence.default(0.8),
+    /**
+     * Optional auth profile. When set, the crawl loop resolves the named
+     * secret via a SecretsProvider and attaches the credential header to
+     * every outbound request. See `core/secrets/auth.ts`.
+     */
+    auth: authProfile.optional(),
   })
   .strict();
 

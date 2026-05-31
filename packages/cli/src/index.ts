@@ -15,7 +15,13 @@
 import { writeFile, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { AnthropicProvider } from '@craiwl/core';
+import {
+  AnthropicProvider,
+  CompositeSecretsProvider,
+  EnvSecretsProvider,
+  FileSecretsProvider,
+  type SecretsProvider,
+} from '@craiwl/core';
 import { Tier0Fetcher, RobotsCache, type Fetcher } from '@craiwl/fetcher';
 import {
   runJob,
@@ -31,6 +37,7 @@ import {
   type SerializedOutput,
   type ScheduleEntry,
 } from '@craiwl/orchestrator';
+import type { AuthProfile } from '@craiwl/core';
 
 export const PACKAGE_NAME = '@craiwl/cli';
 
@@ -45,6 +52,10 @@ USAGE
   craiwl schedule remove <id>                              unregister
   craiwl schedule run-due                                  run anything due now
   craiwl schedule daemon                                   long-running scheduler loop
+  craiwl secret set <name> [--value <v>]                   store a secret (prompts if no value)
+  craiwl secret list                                       names only (never values)
+  craiwl secret get <name>                                 print one secret to stdout
+  craiwl secret remove <name>                              delete a stored secret
   craiwl --help
 
 COMMON OPTIONS
@@ -59,6 +70,11 @@ COMMON OPTIONS
   --self-heal             on locator failures, re-invoke LLM to repair (requires ANTHROPIC_API_KEY)
   --max-repairs <n>       cap on repair LLM calls per crawl (default: 20)
   --diff-against <path>   path to a previous run's records.json — emit a record diff
+  --auth-type <kind>      bearer | api-key | basic — adds an auth profile to the compiled config
+  --auth-secret <name>    secret name (looked up via env then ~/.craiwl/secrets.json)
+  --auth-header <name>    api-key only: header name (e.g. X-API-Key)
+  --auth-username <user>  basic only: username
+  --secrets-file <path>   override the secrets file location (default: ~/.craiwl/secrets.json)
 
 SCHEDULE OPTIONS
   --every <duration>      interval, e.g. 30m, 6h, 1d
@@ -69,7 +85,7 @@ ENVIRONMENT
   ANTHROPIC_API_KEY       required for compile (set in your shell or .env)
 `;
 
-type Command = 'crawl' | 'compile' | 'run' | 'schedule' | 'help';
+type Command = 'crawl' | 'compile' | 'run' | 'schedule' | 'secret' | 'help';
 
 type Parsed = {
   command: Command;
@@ -84,14 +100,20 @@ export function parseArgs(argv: string[]): Parsed {
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') return out;
 
   const cmd = argv[0];
-  if (cmd === 'crawl' || cmd === 'compile' || cmd === 'run' || cmd === 'schedule') {
+  if (
+    cmd === 'crawl' ||
+    cmd === 'compile' ||
+    cmd === 'run' ||
+    cmd === 'schedule' ||
+    cmd === 'secret'
+  ) {
     out.command = cmd;
   } else {
     throw new Error(`unknown command: ${cmd}`);
   }
 
   let cursor = 1;
-  if (cmd === 'schedule' && argv[1] && !argv[1].startsWith('-')) {
+  if ((cmd === 'schedule' || cmd === 'secret') && argv[1] && !argv[1].startsWith('-')) {
     out.subcommand = argv[1];
     cursor = 2;
   }
@@ -154,6 +176,27 @@ async function readPreviousRecords(path: string) {
   return parsed;
 }
 
+function buildAuthFromCliFlags(args: Parsed): AuthProfile | undefined {
+  const type = args.options['auth-type'] as string | undefined;
+  if (!type) return undefined;
+  const secret = args.options['auth-secret'] as string | undefined;
+  if (!secret) {
+    throw new Error(`--auth-type ${type} requires --auth-secret <name>`);
+  }
+  if (type === 'bearer') return { type: 'bearer', secret };
+  if (type === 'api-key') {
+    const header = args.options['auth-header'] as string | undefined;
+    if (!header) throw new Error('--auth-type api-key requires --auth-header <name>');
+    return { type: 'api-key', header, valueTemplate: '{secret}', secret };
+  }
+  if (type === 'basic') {
+    const username = args.options['auth-username'] as string | undefined;
+    if (!username) throw new Error('--auth-type basic requires --auth-username <user>');
+    return { type: 'basic', username, secret };
+  }
+  throw new Error(`--auth-type: unknown kind "${type}" (use bearer|api-key|basic)`);
+}
+
 async function commandCrawl(args: Parsed): Promise<void> {
   const url = args.positional[0];
   const goal = args.options['goal'];
@@ -164,6 +207,8 @@ async function commandCrawl(args: Parsed): Promise<void> {
   const fetcher = new Tier0Fetcher({ userAgent });
   const robotsCache = buildRobotsCache(fetcher);
   const llm = new AnthropicProvider();
+  const authProfile = buildAuthFromCliFlags(args);
+  const secrets = authProfile ? buildSecrets(args) : undefined;
 
   const result = await runJob({
     entryUrl: url,
@@ -172,6 +217,8 @@ async function commandCrawl(args: Parsed): Promise<void> {
     robotsCache,
     userAgent,
     llm,
+    ...(authProfile ? { auth: authProfile } : {}),
+    ...(secrets ? { secrets } : {}),
     ...(args.options['scope']
       ? { scope: args.options['scope'] as 'single' | 'section' | 'site' }
       : {}),
@@ -208,6 +255,8 @@ async function commandCompile(args: Parsed): Promise<void> {
   const fetcher = new Tier0Fetcher({ userAgent });
   const robotsCache = buildRobotsCache(fetcher);
   const llm = new AnthropicProvider();
+  const authProfile = buildAuthFromCliFlags(args);
+  const secrets = authProfile ? buildSecrets(args) : undefined;
 
   // Run with maxPages=1 so we compile against the entry page and stop.
   const result = await runJob({
@@ -219,6 +268,8 @@ async function commandCompile(args: Parsed): Promise<void> {
     llm,
     maxPages: 1,
     followLinks: false,
+    ...(authProfile ? { auth: authProfile } : {}),
+    ...(secrets ? { secrets } : {}),
   });
 
   await writeFile(outputFile, exportConfig(result.config), 'utf8');
@@ -237,6 +288,7 @@ async function commandRun(args: Parsed): Promise<void> {
   // The LLM is only needed for self-heal in `run` — compile is already done.
   const selfHealOn = Boolean(args.options['self-heal']);
   const llm = selfHealOn ? new AnthropicProvider() : undefined;
+  const secrets = config.auth ? buildSecrets(args) : undefined;
 
   const diffAgainst = args.options['diff-against'] as string | undefined;
   const previousRecords = diffAgainst ? await readPreviousRecords(diffAgainst) : undefined;
@@ -249,6 +301,7 @@ async function commandRun(args: Parsed): Promise<void> {
     userAgent,
     config,
     ...(llm ? { llm } : {}),
+    ...(secrets ? { secrets } : {}),
     ...(args.options['scope']
       ? { scope: args.options['scope'] as 'single' | 'section' | 'site' }
       : {}),
@@ -297,6 +350,7 @@ export async function main(argv: string[]): Promise<number> {
     else if (parsed.command === 'compile') await commandCompile(parsed);
     else if (parsed.command === 'run') await commandRun(parsed);
     else if (parsed.command === 'schedule') await commandSchedule(parsed);
+    else if (parsed.command === 'secret') await commandSecret(parsed);
     return 0;
   } catch (err) {
     process.stderr.write(`error: ${(err as Error).message}\n`);
@@ -387,6 +441,77 @@ async function scheduleDaemon(args: Parsed, store: ScheduleStore): Promise<void>
   process.on('SIGTERM', stop);
 
   await scheduler.runDaemon(pollMs, ac.signal);
+}
+
+function buildSecrets(args: Parsed): SecretsProvider {
+  // Env-var lookups beat the on-disk file, matching standard CLI conventions
+  // for AWS/GCP/Anthropic SDKs.
+  const env = new EnvSecretsProvider();
+  const file = new FileSecretsProvider(
+    args.options['secrets-file'] ? { path: args.options['secrets-file'] as string } : {},
+  );
+  return new CompositeSecretsProvider([env, file]);
+}
+
+async function commandSecret(args: Parsed): Promise<void> {
+  const sub = args.subcommand ?? 'list';
+  const secrets = buildSecrets(args);
+
+  if (sub === 'set') {
+    const name = args.positional[0];
+    if (!name) throw new Error('secret set: missing <name>');
+    const valueArg = args.options['value'] as string | undefined;
+    const value = valueArg ?? (await readSecretFromStdin());
+    if (!value) throw new Error('secret set: empty value');
+    await secrets.set(name, value);
+    process.stdout.write(`set ${name}\n`);
+    return;
+  }
+
+  if (sub === 'list') {
+    const names = await secrets.list();
+    if (names.length === 0) {
+      process.stdout.write('no secrets stored\n');
+      return;
+    }
+    for (const n of names) process.stdout.write(`${n}\n`);
+    return;
+  }
+
+  if (sub === 'remove') {
+    const name = args.positional[0];
+    if (!name) throw new Error('secret remove: missing <name>');
+    const removed = await secrets.remove(name);
+    process.stdout.write(removed ? `removed ${name}\n` : `no such secret: ${name}\n`);
+    return;
+  }
+
+  if (sub === 'get') {
+    // Intentionally not a default behavior — `get` prints the value to
+    // stdout so it can be piped into other tools. Users have to ask for it.
+    const name = args.positional[0];
+    if (!name) throw new Error('secret get: missing <name>');
+    const value = await secrets.get(name);
+    if (value === undefined) {
+      process.stderr.write(`secret "${name}" not found\n`);
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(value);
+    if (!value.endsWith('\n')) process.stdout.write('\n');
+    return;
+  }
+
+  throw new Error(`secret: unknown subcommand "${sub}"`);
+}
+
+async function readSecretFromStdin(): Promise<string> {
+  if (process.stdin.isTTY) {
+    process.stderr.write('value: ');
+  }
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString('utf8').replace(/\n$/, '');
 }
 
 function buildScheduler(args: Parsed, store: ScheduleStore): Scheduler {

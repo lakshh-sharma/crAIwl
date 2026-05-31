@@ -19,7 +19,7 @@
  * PR as the schema change) — this is the durable contract self-heal and
  * scheduling rely on.
  */
-export const STRATEGY_CONFIG_VERSION = '1.0.0' as const;
+export const STRATEGY_CONFIG_VERSION = '1.1.0' as const;
 
 const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)$/;
 
