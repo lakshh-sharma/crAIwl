@@ -171,5 +171,5 @@ export type ExtractedRecord = typeof extractedRecord.$inferSelect;
 export type NewExtractedRecord = typeof extractedRecord.$inferInsert;
 export type FetchAttempt = typeof fetchAttempt.$inferSelect;
 export type NewFetchAttempt = typeof fetchAttempt.$inferInsert;
-export type AuditEvent = typeof auditEvent.$inferSelect;
-export type NewAuditEvent = typeof auditEvent.$inferInsert;
+export type AuditEventRow = typeof auditEvent.$inferSelect;
+export type NewAuditEventRow = typeof auditEvent.$inferInsert;

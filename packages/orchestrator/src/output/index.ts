@@ -5,7 +5,12 @@ export {
   type SerializedOutput,
 } from './serialize.js';
 
-export { buildManifest, type RunManifest, type BuildManifestInput } from './manifest.js';
+export {
+  buildManifest,
+  type RunManifest,
+  type BuildManifestInput,
+  type ComplianceSummary,
+} from './manifest.js';
 
 export { exportConfig, importConfig, ConfigImportError, type ConfigEnvelope } from './config-io.js';
 

@@ -11,6 +11,7 @@
  * always `respect`.
  */
 
+import type { RobotsBypassEvent } from '@craiwl/core';
 import type { RobotsCache } from '@craiwl/fetcher';
 
 export type RobotsPolicy = 'respect' | 'warn' | 'ignore';
@@ -25,13 +26,8 @@ export type RobotsDecision = {
   reason: 'allowed-by-robots' | 'disallowed-respect' | 'disallowed-warn' | 'disallowed-ignore';
 };
 
-export type AuditEvent = {
-  at: string;
-  kind: 'robots-bypass';
-  policy: 'warn' | 'ignore';
-  url: string;
-  userAgent: string;
-};
+/** Re-export so existing callers keep working. */
+export type AuditEvent = RobotsBypassEvent;
 
 export type RobotsPolicyCheckerOptions = {
   cache: RobotsCache;

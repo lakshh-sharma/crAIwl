@@ -18,7 +18,10 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import type { ExtractedRecord } from '@craiwl/extractor';
+import type { AuditLog } from '@craiwl/core';
+import { toJsonl } from '@craiwl/core';
 import type { RunDiff } from '../cost/index.js';
+import type { RunManifest } from '../output/manifest.js';
 
 export type ScheduleEntry = {
   id: string;
@@ -144,5 +147,45 @@ export class ScheduleStore {
     const path = join(this.baseDir, RUNS_DIR, `${runId}.diff.json`);
     await writeFile(path, `${JSON.stringify(diff, null, 2)}\n`, 'utf8');
     return path;
+  }
+
+  /** Persist the audit log as JSONL alongside the run output. */
+  async writeRunAudit(runId: string, audit: AuditLog): Promise<string> {
+    await this.ensureDirs();
+    const path = join(this.baseDir, RUNS_DIR, `${runId}.audit.jsonl`);
+    await writeFile(path, `${toJsonl(audit)}\n`, 'utf8');
+    return path;
+  }
+
+  /** Persist the manifest as JSON. The dashboard reads these. */
+  async writeRunManifest(runId: string, manifest: RunManifest): Promise<string> {
+    await this.ensureDirs();
+    const path = join(this.baseDir, RUNS_DIR, `${runId}.manifest.json`);
+    await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    return path;
+  }
+
+  /** List all run manifests on disk, oldest first. */
+  async listRunManifests(): Promise<RunManifest[]> {
+    const dir = join(this.baseDir, RUNS_DIR);
+    let names: string[];
+    try {
+      const { readdir } = await import('node:fs/promises');
+      names = await readdir(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw err;
+    }
+    const manifestFiles = names.filter((n) => n.endsWith('.manifest.json')).sort();
+    const out: RunManifest[] = [];
+    for (const f of manifestFiles) {
+      try {
+        const raw = await readFile(join(dir, f), 'utf8');
+        out.push(JSON.parse(raw) as RunManifest);
+      } catch {
+        // Skip unreadable / malformed manifests rather than failing the whole list.
+      }
+    }
+    return out;
   }
 }

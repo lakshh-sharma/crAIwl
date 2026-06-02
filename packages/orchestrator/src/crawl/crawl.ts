@@ -18,7 +18,7 @@
 import { JSDOM } from 'jsdom';
 import { cleanHtml, execute, type ExtractedRecord } from '@craiwl/extractor';
 import type { Fetcher, FetchTier, RobotsCache } from '@craiwl/fetcher';
-import type { LLMProvider, StrategyConfig } from '@craiwl/core';
+import type { AuditLog, AuthProfile, LLMProvider, StrategyConfig } from '@craiwl/core';
 import { Frontier } from './frontier.js';
 import { PolitenessGate, type PolitenessOptions } from './politeness.js';
 import { RobotsPolicyChecker, type AuditEvent, type RobotsPolicy } from './robots-policy.js';
@@ -61,6 +61,12 @@ export type CrawlSiteOptions = {
    * never reaches structured logs. See `core/secrets/auth.ts`.
    */
   authHeaders?: Record<string, string>;
+  /**
+   * Optional audit log. Robots bypasses, auth attachments and HTTP auth
+   * failures are recorded here for the compliance report. The crawl runs
+   * fine without one — events just go nowhere.
+   */
+  auditLog?: AuditLog;
   /** Enable per-field repair on extraction failures. Requires an LLM. */
   selfHeal?: {
     llm: LLMProvider;
@@ -140,8 +146,16 @@ export async function crawlSite(opts: CrawlSiteOptions): Promise<CrawlSiteResult
     cache: opts.robotsCache,
     userAgent: opts.userAgent,
     ...(opts.robotsPolicy ? { policy: opts.robotsPolicy } : {}),
-    onAudit: (e) => auditEvents.push(e),
+    onAudit: (e) => {
+      auditEvents.push(e);
+      opts.auditLog?.record(e);
+    },
   });
+  // Auth-attached / http-auth-failure events fire from the fetch path
+  // below. Derive the constant bits once so the per-page emit is cheap.
+  const authMeta = opts.authHeaders
+    ? deriveAuthMeta(opts.authHeaders, opts.config.auth)
+    : undefined;
   const followLinks = opts.followLinks ?? true;
 
   // Self-heal state: the config mutates across pages — a repair on page 3
@@ -203,10 +217,32 @@ export async function crawlSite(opts: CrawlSiteOptions): Promise<CrawlSiteResult
         next.url,
         opts.authHeaders ? { headers: { ...opts.authHeaders } } : {},
       );
+      // Once the fetch has gone out, the credentials are committed. Audit
+      // BEFORE evaluating the response so failed-auth requests still show
+      // which URL the token landed on.
+      if (authMeta && opts.auditLog) {
+        opts.auditLog.record({
+          at: now().toISOString(),
+          kind: 'auth-attached',
+          url: next.url,
+          secretName: authMeta.secretName,
+          headerNames: authMeta.headerNames,
+          authType: authMeta.authType,
+        });
+      }
       politeness.noteResponse(next.url, {
         status: res.status,
         ...(res.headers['retry-after'] ? { retryAfter: res.headers['retry-after'] } : {}),
       });
+
+      if (res.status === 401 || res.status === 403) {
+        opts.auditLog?.record({
+          at: now().toISOString(),
+          kind: 'http-auth-failure',
+          url: next.url,
+          status: res.status,
+        });
+      }
 
       if (res.status >= 400) {
         failures.push({ url: next.url, error: `http-${res.status}` });
@@ -321,6 +357,24 @@ function emitProgress(
     recordsExtracted: records.length,
     failures,
   });
+}
+
+type AuthMeta = {
+  secretName: string;
+  headerNames: string[];
+  authType: 'bearer' | 'api-key' | 'basic';
+};
+
+function deriveAuthMeta(
+  headers: Record<string, string>,
+  profile: AuthProfile | undefined,
+): AuthMeta | undefined {
+  if (!profile) return undefined;
+  return {
+    secretName: profile.secret,
+    headerNames: Object.keys(headers),
+    authType: profile.type,
+  };
 }
 
 function extractLinks(html: string, baseUrl: string): string[] {

@@ -20,6 +20,7 @@ import {
   CompositeSecretsProvider,
   EnvSecretsProvider,
   FileSecretsProvider,
+  toJsonl,
   type SecretsProvider,
 } from '@craiwl/core';
 import { Tier0Fetcher, RobotsCache, type Fetcher } from '@craiwl/fetcher';
@@ -34,6 +35,8 @@ import {
   Scheduler,
   parseDuration,
   formatDuration,
+  aggregate,
+  renderDashboardHtml,
   type SerializedOutput,
   type ScheduleEntry,
 } from '@craiwl/orchestrator';
@@ -56,6 +59,7 @@ USAGE
   craiwl secret list                                       names only (never values)
   craiwl secret get <name>                                 print one secret to stdout
   craiwl secret remove <name>                              delete a stored secret
+  craiwl dashboard [--output-file dashboard.html]          HTML rollup of runs in ~/.craiwl/runs
   craiwl --help
 
 COMMON OPTIONS
@@ -75,6 +79,8 @@ COMMON OPTIONS
   --auth-header <name>    api-key only: header name (e.g. X-API-Key)
   --auth-username <user>  basic only: username
   --secrets-file <path>   override the secrets file location (default: ~/.craiwl/secrets.json)
+  --audit <path>          write the run's audit log (robots bypasses, auth attachments) as JSONL
+  --manifest <path>       write the run manifest as JSON (read by 'craiwl dashboard')
 
 SCHEDULE OPTIONS
   --every <duration>      interval, e.g. 30m, 6h, 1d
@@ -85,7 +91,7 @@ ENVIRONMENT
   ANTHROPIC_API_KEY       required for compile (set in your shell or .env)
 `;
 
-type Command = 'crawl' | 'compile' | 'run' | 'schedule' | 'secret' | 'help';
+type Command = 'crawl' | 'compile' | 'run' | 'schedule' | 'secret' | 'dashboard' | 'help';
 
 type Parsed = {
   command: Command;
@@ -105,7 +111,8 @@ export function parseArgs(argv: string[]): Parsed {
     cmd === 'compile' ||
     cmd === 'run' ||
     cmd === 'schedule' ||
-    cmd === 'secret'
+    cmd === 'secret' ||
+    cmd === 'dashboard'
   ) {
     out.command = cmd;
   } else {
@@ -161,6 +168,38 @@ async function emit(out: SerializedOutput, outputFile: string | undefined): Prom
     return;
   }
   process.stdout.write(out.body);
+}
+
+/**
+ * Writes the audit log and/or manifest to disk if the caller asked for it.
+ * Both flags are optional — runs that don't pass them just skip the write.
+ * The audit summary is printed to stderr regardless: an authenticated
+ * crawl that produced zero auth-failures is the kind of thing operators
+ * want a one-line confirmation of.
+ */
+async function writeAuditArtifacts(
+  args: Parsed,
+  result: Awaited<ReturnType<typeof runJob>>,
+): Promise<void> {
+  const auditPath = args.options['audit'] as string | undefined;
+  if (auditPath) {
+    await writeFile(auditPath, `${toJsonl(result.auditLog)}\n`, 'utf8');
+    process.stderr.write(`wrote audit log to ${auditPath}\n`);
+  }
+  const manifestPath = args.options['manifest'] as string | undefined;
+  if (manifestPath) {
+    await writeFile(manifestPath, `${JSON.stringify(result.manifest, null, 2)}\n`, 'utf8');
+    process.stderr.write(`wrote manifest to ${manifestPath}\n`);
+  }
+  const c = result.manifest.compliance;
+  if (c.authProfile || c.robotsBypasses > 0) {
+    const parts = [
+      c.authProfile ? `auth: ${c.authProfile.type} on ${c.pagesAuthenticated} pages` : null,
+      c.httpAuthFailures > 0 ? `${c.httpAuthFailures} auth failure(s)` : null,
+      c.robotsBypasses > 0 ? `${c.robotsBypasses} robots bypass(es)` : null,
+    ].filter(Boolean);
+    if (parts.length) process.stderr.write(`compliance: ${parts.join(' · ')}\n`);
+  }
 }
 
 function buildRobotsCache(fetcher: Fetcher): RobotsCache {
@@ -241,6 +280,7 @@ async function commandCrawl(args: Parsed): Promise<void> {
 
   const format = (args.options['out'] as string) ?? 'json';
   await emit(serialize(result, format), args.options['output-file'] as string | undefined);
+  await writeAuditArtifacts(args, result);
 }
 
 async function commandCompile(args: Parsed): Promise<void> {
@@ -329,6 +369,7 @@ async function commandRun(args: Parsed): Promise<void> {
 
   const format = (args.options['out'] as string) ?? 'json';
   await emit(serialize(result, format), args.options['output-file'] as string | undefined);
+  await writeAuditArtifacts(args, result);
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -351,6 +392,7 @@ export async function main(argv: string[]): Promise<number> {
     else if (parsed.command === 'run') await commandRun(parsed);
     else if (parsed.command === 'schedule') await commandSchedule(parsed);
     else if (parsed.command === 'secret') await commandSecret(parsed);
+    else if (parsed.command === 'dashboard') await commandDashboard(parsed);
     return 0;
   } catch (err) {
     process.stderr.write(`error: ${(err as Error).message}\n`);
@@ -503,6 +545,22 @@ async function commandSecret(args: Parsed): Promise<void> {
   }
 
   throw new Error(`secret: unknown subcommand "${sub}"`);
+}
+
+async function commandDashboard(args: Parsed): Promise<void> {
+  const store = new ScheduleStore(
+    args.options['base-dir'] ? { baseDir: args.options['base-dir'] as string } : {},
+  );
+  const manifests = await store.listRunManifests();
+  const summary = aggregate(manifests);
+  const html = renderDashboardHtml(summary);
+  const outFile = args.options['output-file'] as string | undefined;
+  if (outFile) {
+    await writeFile(outFile, html, 'utf8');
+    process.stderr.write(`wrote dashboard for ${summary.totals.runs} run(s) to ${outFile}\n`);
+    return;
+  }
+  process.stdout.write(html);
 }
 
 async function readSecretFromStdin(): Promise<string> {

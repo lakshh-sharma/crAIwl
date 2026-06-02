@@ -141,6 +141,9 @@ export class Scheduler {
       );
       // Persist raw records for the next run's diff.
       await this.opts.store.writeRunRecords(result.runId, result.records);
+      // Manifest + audit log feed the dashboard and the compliance report.
+      await this.opts.store.writeRunManifest(result.runId, result.manifest);
+      await this.opts.store.writeRunAudit(result.runId, result.auditLog);
 
       let diffPath: string | undefined;
       if (result.diff) {

@@ -8,7 +8,7 @@
  */
 
 import type { ExtractedRecord } from '@craiwl/extractor';
-import type { StrategyConfig } from '@craiwl/core';
+import type { AuditLog, StrategyConfig } from '@craiwl/core';
 import type { RunCostBreakdown } from '../cost/index.js';
 
 export type RunManifest = {
@@ -36,6 +36,26 @@ export type RunManifest = {
   fieldCoverage: Record<string, number>;
   /** LLM + page + wall-clock cost breakdown for this run. */
   cost: RunCostBreakdown;
+  /**
+   * Compliance rollup — what credentials were used, how many robots
+   * overrides fired, how many pages got auth headers, how many auth
+   * failures came back. Always present; fields are zeroed when nothing
+   * audit-worthy happened.
+   */
+  compliance: ComplianceSummary;
+};
+
+export type ComplianceSummary = {
+  /** null when the run was unauthenticated. */
+  authProfile: { type: 'bearer' | 'api-key' | 'basic'; secretNames: string[] } | null;
+  /** Distinct secret names accessed during the run — never values. */
+  secretsAccessed: string[];
+  /** Pages that had auth headers attached. */
+  pagesAuthenticated: number;
+  /** Robots.txt bypasses (warn or ignore policy). */
+  robotsBypasses: number;
+  /** 401/403 responses. A non-zero count usually means a bad token. */
+  httpAuthFailures: number;
 };
 
 export type BuildManifestInput = {
@@ -50,6 +70,9 @@ export type BuildManifestInput = {
   pagesSkipped: number;
   pagesFailed: number;
   cost: RunCostBreakdown;
+  /** Source of truth for the compliance summary. Optional — runs that don't
+   * pass an audit log produce a zeroed/unauthenticated summary. */
+  auditLog?: AuditLog;
 };
 
 export function buildManifest(input: BuildManifestInput): RunManifest {
@@ -76,6 +99,42 @@ export function buildManifest(input: BuildManifestInput): RunManifest {
     },
     fieldCoverage: computeCoverage(input.records),
     cost: input.cost,
+    compliance: buildCompliance(input.config, input.auditLog),
+  };
+}
+
+function buildCompliance(
+  config: StrategyConfig,
+  auditLog: AuditLog | undefined,
+): ComplianceSummary {
+  const authProfile: ComplianceSummary['authProfile'] = config.auth
+    ? { type: config.auth.type, secretNames: [config.auth.secret] }
+    : null;
+  if (!auditLog) {
+    return {
+      authProfile,
+      secretsAccessed: [],
+      pagesAuthenticated: 0,
+      robotsBypasses: 0,
+      httpAuthFailures: 0,
+    };
+  }
+  const secrets = new Set<string>();
+  let pagesAuthenticated = 0;
+  let robotsBypasses = 0;
+  let httpAuthFailures = 0;
+  for (const e of auditLog.events()) {
+    if (e.kind === 'secret-accessed') secrets.add(e.secretName);
+    else if (e.kind === 'auth-attached') pagesAuthenticated++;
+    else if (e.kind === 'robots-bypass') robotsBypasses++;
+    else if (e.kind === 'http-auth-failure') httpAuthFailures++;
+  }
+  return {
+    authProfile,
+    secretsAccessed: Array.from(secrets).sort(),
+    pagesAuthenticated,
+    robotsBypasses,
+    httpAuthFailures,
   };
 }
 

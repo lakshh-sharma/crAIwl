@@ -13,7 +13,10 @@ import { randomUUID } from 'node:crypto';
 import { cleanHtml, partitionByConfidence, type ExtractedRecord } from '@craiwl/extractor';
 import type { Fetcher, RobotsCache } from '@craiwl/fetcher';
 import {
+  auditedProvider,
+  InMemoryAuditLog,
   resolveAuthHeaders,
+  type AuditLog,
   type AuthProfile,
   type LLMProvider,
   type SecretsProvider,
@@ -57,6 +60,13 @@ export type RunJobOptions = {
    * have to write auth into the freshly-compiled config.
    */
   auth?: AuthProfile;
+  /**
+   * Caller-supplied audit log. When omitted, runJob creates an
+   * InMemoryAuditLog internally so the manifest's compliance section is
+   * still populated. Pass one in when you want to persist the JSONL or
+   * inspect events afterwards.
+   */
+  auditLog?: AuditLog;
   /** Override clock for deterministic runs in tests. */
   now?: () => Date;
   /** Override the run id (defaults to a fresh UUID). */
@@ -74,11 +84,14 @@ export type RunJobResult = {
   cost: RunCostBreakdown;
   /** Populated when the caller supplied `previousRecords`. */
   diff?: RunDiff;
+  /** The audit log the run wrote to. Always present. */
+  auditLog: AuditLog;
 };
 
 export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
   const now = opts.now ?? (() => new Date());
   const runId = opts.runId ?? `run-${randomUUID()}`;
+  const auditLog: AuditLog = opts.auditLog ?? new InMemoryAuditLog();
 
   // 1. Resolve auth headers upfront when we know we'll need them. The crawl,
   //    the compile-time entry fetch, and any saved-config auth profile all
@@ -90,7 +103,11 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
     if (!opts.secrets) {
       throw new Error('runJob: auth is configured but no SecretsProvider was supplied');
     }
-    authHeaders = await resolveAuthHeaders(pendingAuth, opts.secrets);
+    // Wrap the provider so every read gets audited. We don't audit the
+    // provider passed in by the caller directly — they might reuse it
+    // across many runs and want their own audit policy.
+    const provider = auditedProvider(opts.secrets, { audit: auditLog, reason: 'resolve-auth' });
+    authHeaders = await resolveAuthHeaders(pendingAuth, provider);
   }
 
   // 2. Get a config. Either use one the caller provided, or compile one from
@@ -143,6 +160,7 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
     fetcher: opts.fetcher,
     robotsCache: opts.robotsCache,
     userAgent: opts.userAgent,
+    auditLog,
     ...(authHeaders ? { authHeaders } : {}),
     ...(opts.scope ? { scope: opts.scope } : {}),
     ...(opts.maxPages !== undefined ? { maxPages: opts.maxPages } : {}),
@@ -189,7 +207,7 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
     recordCount: crawl.records.length,
   });
 
-  // 5. Build the manifest (now carries cost).
+  // 5. Build the manifest (now carries cost + compliance).
   const manifest = buildManifest({
     runId,
     startedAt: crawl.startedAt,
@@ -202,6 +220,7 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
     pagesSkipped: crawl.skipped.length,
     pagesFailed: crawl.failures.length,
     cost,
+    auditLog,
   });
 
   // 6. Optional diff against a previous run.
@@ -216,6 +235,7 @@ export async function runJob(opts: RunJobOptions): Promise<RunJobResult> {
     reviewRecords: partition.review,
     manifest,
     cost,
+    auditLog,
     ...(diff ? { diff } : {}),
   };
 }
