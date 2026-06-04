@@ -13,6 +13,7 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
+    "@craiwl/api": "workspace:*",
     "@craiwl/core": "workspace:*",
     "@craiwl/fetcher": "workspace:*",
     "@craiwl/orchestrator": "workspace:*"

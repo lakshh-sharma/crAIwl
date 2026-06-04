@@ -1,0 +1,33 @@
+{
+  "strategyVersion": "1.1.0",
+  "createdBy": "fixture",
+  "createdAt": "2026-05-01T00:00:00.000Z",
+  "lastValidated": null,
+  "reason": "compile",
+  "target": { "entryUrl": "https://example.com", "scope": "section" },
+  "goal": "extract article title + price",
+  "pageTemplates": [
+    {
+      "id": "page",
+      "multiRecord": false,
+      "fields": {
+        "title": {
+          "locators": ["p.article-title"],
+          "semanticAnchor": "article title",
+          "type": "string",
+          "required": true
+        },
+        "price": {
+          "locators": ["p.article-price"],
+          "semanticAnchor": "article price",
+          "type": "number",
+          "required": true,
+          "transform": "stripCurrency|toFloat"
+        }
+      }
+    }
+  ],
+  "pagination": { "type": "none" },
+  "fetchProfile": "static",
+  "confidenceFloor": 0.8
+}

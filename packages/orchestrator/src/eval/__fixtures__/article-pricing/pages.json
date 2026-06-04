@@ -1,0 +1,12 @@
+[
+  {
+    "sourceUrl": "https://example.com/a",
+    "htmlFile": "page-a.html",
+    "expected": [{ "fields": { "title": { "value": "Hello A" }, "price": { "value": 9 } } }]
+  },
+  {
+    "sourceUrl": "https://example.com/b",
+    "htmlFile": "page-b.html",
+    "expected": [{ "fields": { "title": { "value": "Hello B" }, "price": { "value": 29 } } }]
+  }
+]

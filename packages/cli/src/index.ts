@@ -24,6 +24,7 @@ import {
   type SecretsProvider,
 } from '@craiwl/core';
 import { Tier0Fetcher, RobotsCache, type Fetcher } from '@craiwl/fetcher';
+import { createServer as createApiServer } from '@craiwl/api';
 import {
   runJob,
   exportConfig,
@@ -37,6 +38,9 @@ import {
   formatDuration,
   aggregate,
   renderDashboardHtml,
+  loadFixtures,
+  runEval,
+  formatReport,
   type SerializedOutput,
   type ScheduleEntry,
 } from '@craiwl/orchestrator';
@@ -60,6 +64,8 @@ USAGE
   craiwl secret get <name>                                 print one secret to stdout
   craiwl secret remove <name>                              delete a stored secret
   craiwl dashboard [--output-file dashboard.html]          HTML rollup of runs in ~/.craiwl/runs
+  craiwl eval --fixtures <dir> [--json <path>]             run the golden-test corpus, exit non-zero on failure
+  craiwl serve [--port 3000] [--host 127.0.0.1]            run the HTTP API (POST /scope/confirm + GET /healthz)
   craiwl --help
 
 COMMON OPTIONS
@@ -91,7 +97,16 @@ ENVIRONMENT
   ANTHROPIC_API_KEY       required for compile (set in your shell or .env)
 `;
 
-type Command = 'crawl' | 'compile' | 'run' | 'schedule' | 'secret' | 'dashboard' | 'help';
+type Command =
+  | 'crawl'
+  | 'compile'
+  | 'run'
+  | 'schedule'
+  | 'secret'
+  | 'dashboard'
+  | 'eval'
+  | 'serve'
+  | 'help';
 
 type Parsed = {
   command: Command;
@@ -112,7 +127,9 @@ export function parseArgs(argv: string[]): Parsed {
     cmd === 'run' ||
     cmd === 'schedule' ||
     cmd === 'secret' ||
-    cmd === 'dashboard'
+    cmd === 'dashboard' ||
+    cmd === 'eval' ||
+    cmd === 'serve'
   ) {
     out.command = cmd;
   } else {
@@ -393,6 +410,8 @@ export async function main(argv: string[]): Promise<number> {
     else if (parsed.command === 'schedule') await commandSchedule(parsed);
     else if (parsed.command === 'secret') await commandSecret(parsed);
     else if (parsed.command === 'dashboard') await commandDashboard(parsed);
+    else if (parsed.command === 'eval') return await commandEval(parsed);
+    else if (parsed.command === 'serve') await commandServe(parsed);
     return 0;
   } catch (err) {
     process.stderr.write(`error: ${(err as Error).message}\n`);
@@ -545,6 +564,47 @@ async function commandSecret(args: Parsed): Promise<void> {
   }
 
   throw new Error(`secret: unknown subcommand "${sub}"`);
+}
+
+async function commandServe(args: Parsed): Promise<void> {
+  const port = Number(args.options['port'] ?? 3000);
+  const host = (args.options['host'] as string) ?? '127.0.0.1';
+  const userAgent = (args.options['user-agent'] as string) ?? 'craiwl/0.1';
+  const fetcher = new Tier0Fetcher({ userAgent });
+  const llm = new AnthropicProvider();
+  const secrets = buildSecrets(args);
+  const server = createApiServer({ fetcher, llm, secrets });
+  const listening = await server.listen(port, host);
+  process.stderr.write(`craiwl api listening on http://${host}:${listening}\n`);
+  // Hand off to the runtime — node will keep the event loop alive on the
+  // listening socket. SIGINT triggers a graceful close.
+  const shutdown = async (): Promise<void> => {
+    process.stderr.write('\nshutting down\n');
+    await server.close();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  await new Promise<void>(() => {}); // keep running
+}
+
+async function commandEval(args: Parsed): Promise<number> {
+  const dir = args.options['fixtures'] as string | undefined;
+  if (!dir) throw new Error('eval: --fixtures <dir> is required');
+  const fixtures = await loadFixtures(resolve(dir));
+  if (fixtures.length === 0) {
+    process.stderr.write(`eval: no fixtures found under ${dir}\n`);
+    return 2;
+  }
+  const report = runEval(fixtures);
+  process.stdout.write(formatReport(report));
+  const jsonOut = args.options['json'] as string | undefined;
+  if (jsonOut) {
+    await writeFile(jsonOut, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+    process.stderr.write(`wrote eval report to ${jsonOut}\n`);
+  }
+  // Non-zero exit when any fixture failed — CI uses this directly.
+  return report.totals.fixturesPassed === report.totals.fixtures ? 0 : 1;
 }
 
 async function commandDashboard(args: Parsed): Promise<void> {

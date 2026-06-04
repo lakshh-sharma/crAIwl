@@ -17,6 +17,12 @@
   },
   "dependencies": {
     "@craiwl/core": "workspace:*",
-    "@craiwl/orchestrator": "workspace:*"
+    "@craiwl/extractor": "workspace:*",
+    "@craiwl/fetcher": "workspace:*",
+    "@craiwl/orchestrator": "workspace:*",
+    "jsdom": "^29.1.1"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^28.0.3"
   }
 }

@@ -8,3 +8,4 @@ export * from './schedule/index.js';
 export * from './self-heal/index.js';
 export * from './cost/index.js';
 export * from './dashboard/index.js';
+export * from './eval/index.js';

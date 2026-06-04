@@ -6,5 +6,10 @@
   },
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts", "src/**/*.spec.ts", "dist"],
-  "references": [{ "path": "../core" }, { "path": "../orchestrator" }]
+  "references": [
+    { "path": "../core" },
+    { "path": "../extractor" },
+    { "path": "../fetcher" },
+    { "path": "../orchestrator" }
+  ]
 }
